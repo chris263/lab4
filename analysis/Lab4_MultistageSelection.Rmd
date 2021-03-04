@@ -1,0 +1,293 @@
+---
+title: "Multistage selection"
+author: "Chris Simoes"
+date: "3/1/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_chunk$set(message=FALSE)
+knitr::opts_chunk$set(cache=FALSE)
+```
+## R scripts  
+
+### Reproducibility  
+Here is the [README file](./README.md) for this report  
+
+### Script setup  
+Install packages, start the README.md, set the random seed  
+```{r Script setup, echo=FALSE, include=FALSE}
+ip <- installed.packages()
+packages_used <- c("AlphaSimR", "tidyverse", "workflowr", "here", "selectiongain")
+
+ip <- installed.packages()
+for (package in packages_used){
+  if (!(package %in% ip[,"Package"])) install.packages(package)
+}#END packages_used
+
+here::i_am("analysis/Lab4_MultistageSelection.Rmd")
+
+source("code/addToREADME.R")
+addToREADME(paste0("## ", rmarkdown::metadata$title), append=F)
+addToREADME(c(date(), ""))
+
+packages_info <- ip[packages_used, c("Package", "Version", "Built")]
+addToREADME(c("The packages used in this script are:", "Package, Version, Built"))
+apply(packages_info, 1, function(vec) addToREADME(paste(vec, collapse=" ")))
+addToREADME("")
+
+random_seed <- 153258
+set.seed(random_seed)
+addToREADME(paste("The random seed is", random_seed))
+```
+
+### Required inputs
+`selectiongain` needs the following inputs:
+1. The genotype-related variances: $\sigma^2_G$, $\sigma^2_{GL}$, $\sigma^2_{GY}$, and $\sigma^2_{GLY}$  
+2. The error variance.  It is assumed the same across all stages  
+3. The number of entries going into each stage, and the number leaving the last stage  
+4. The number of locations where evaluations happen for each stage  
+5. The number of replications for each genotype in each trial in each stage  
+6. Because the package was designed by corn breeders, it wants to know the number of *testers* used to make hybrid seed in each stage.  We won't bother with this by setting that to 1 for all stages  
+### Procedure  
+There are three steps to calculating the gain:
+1. Calculating the covariance matrix discussed above. The function is `multistagecor`  
+2. Determining the position of the truncation points for each stage.  Because the distributions are not normal, it is not as simple as for the spreadsheet example.  The function is `multistagetp` (for truncaction point)  
+3. Actually calculating the gain. The function is `multistagegain`
+
+```{r Multistage with selectgain}
+# Genotype-related variances
+varG <- 1
+varGL <- 0.5
+varGY <- 1
+varGLY <- 0.5
+varE <- 1
+allVar <- c(varG, varGL, varGY, varGLY, varE)
+
+Simulations = 100
+
+Fgen = "DH" #F generation of line derivation (can specify "DH")
+# Numbers of entries, locations, and replicates
+nStages <- 3
+nEntries <- c(500, 100, 20, 4) # Last number is how many exit the pipeline
+nLoc <- c(2, 4, 8)
+nRep <- c(1, 2, 2)
+nYears <- c(1,1,2) # Number of years in each stage
+
+addToREADME(c("", "selectiongain pipeline estimation"))
+addToREADME(c("", "Genotype-related variances", "varG, varGL, varGY, varGLY, varE", paste(allVar, collapse="  ")))
+addToREADME(c(paste("Number of stages", nStages), paste("Number of entries", paste(nEntries, collapse=", ")), paste("Number of locations", paste(nLoc, collapse=", ")), paste("Number of replications", paste(nRep, collapse=", "))))
+
+sel_gain <- function(Sel_Entries, j){
+  
+  # Calculate the selected fraction at each stage
+  selFrac <- Sel_Entries[-1] / Sel_Entries[-length(Sel_Entries)]
+  
+  # Calculate the correlation matrix across stages
+  stageCor <- selectiongain::multistagecor(VGCAandE=allVar, T=rep(1, nStages), L=nLoc, Rep=nRep)
+  # Calculate the appropriate truncation points
+  # There are two different algorithms for this purpose
+  truncPts <- selectiongain::multistagetp(alpha=selFrac, corr=stageCor, alg=mvtnorm::Miwa())
+  # Calculate the gain from the product pipeline
+  gain <- selectiongain::multistagegain(Q=truncPts, corr=stageCor, alg=mvtnorm::Miwa())
+  # print(round(gain, 3))
+  gain_matrix[j,3]<<-round(gain,3)
+  
+}
+```
+
+## Simulation with `AlphaSimR`
+It's considerably more complicated to simulate with `AlphaSimR`.  
+
+### Population parameters  
+We have to simulate the population.  
+```{r Population parameters}
+
+pop_alpha <- function(Alpha_Entries){
+  nFounders <<- Alpha_Entries #nEntries[1] Need to have as many founders as will enter pipeline
+  nChr <- 24
+  segSites <- 200
+  founderHaps <<- AlphaSimR::quickHaplo(nInd=nFounders, nChr=nChr, segSites=segSites)
+  addToREADME(c("", "Population parameters",
+  paste("Number of founders ", nFounders), 
+  paste("Number of chromosomes ", nChr), 
+  paste("Number of segregating sites per chromosome", segSites), "")
+  )
+}
+
+
+# Create haplotypes for founder population of outbred individuals
+# We have used runMacs before. quickHaplo doesn't run a coalescent but is fast
+
+```
+
+Then simulate the genetic architecture.  New this time, I am going to assume some AxA epistasis.
+```{r Geno to pheno}
+
+geno_alpha <- function(alpha_founders){
+  nQTL <<- 100 # per chromosome
+  meanDD <- 0.4
+  varDD <- 0.04
+  relAA <- 0.5
+  addToREADME(c("", "Genotype to phenotype map",
+                paste("Number of QTL per chromosome", nQTL),
+                paste("Dominance degree mean", meanDD),
+                paste("Dominance degree variance", varDD),
+                paste("Relative epistasis", relAA))
+              )
+  # Setup the genotype to phenotype mapping
+  SP <<- AlphaSimR::SimParam$new(alpha_founders)
+  # useVarA=FALSE means that the total genotypic variance, rather than just the
+  # additive variance, will be set to 1
+  SP$addTraitADE(nQtlPerChr=nQTL, meanDD=meanDD, varDD=varDD, relAA=relAA, useVarA=FALSE)
+  
+  # Create a new population of founders
+  founders <<- AlphaSimR::newPop(founderHaps, simParam=SP)
+  
+
+}
+
+```
+
+### Run the selection simulations
+Finally, simulate the selection pipeline.  
+```{r Run simulations}
+addToREADME(c("", "AlphaSimR phenotypic selection",
+              "Same numbers of entries, location, and replicates as for `selectiongain`"
+              )
+            )
+
+# Calculate the error variance resulting from the number of locations and reps
+# Note that the number of years per stage is always 1
+impliedVarE <- varGL/nLoc + varGY + varGLY/nLoc + varE/nLoc/nRep
+addToREADME(c("", "Implied error variances", "Stage 1, Stage 2, Stage 3",
+              paste(round(impliedVarE, 3), collapse="  ")
+              )
+            )
+
+# Function to make a simple data structure out of a population
+# AlphaSimR doesn't retain varE once you have setPheno, so supply it
+makeRecFromPop <- function(pop, varE=1){
+  return(dplyr::tibble(id=pop@id, 
+                       mother=pop@mother, 
+                       father=pop@father, 
+                       pheno=AlphaSimR::pheno(pop), 
+                       varE=varE
+                       )
+         )
+}
+
+# Make an empty set of records
+# We will not be using these records in Lab4, but hopefully soon
+records <- dplyr::tibble()
+
+# Because this is a stochastic simulation, we have to run it multiple times
+# to get a sense of the simulation to simulation variation
+Sim_alpha <- function(founders, nStages, SP, j){
+  nRepeat <- 50
+  # addToREADME(c("", paste("Number of simulation repeats", nRepeat)))
+  gainEachRepeat <- numeric(nRepeat)
+  
+  for (i in 1:nRepeat){
+    # The production pipeline starts with a bunch of new lines
+    exptLines <- founders
+    startMeanGV <- mean(AlphaSimR::gv(exptLines)) # Should be 0 but just in case
+    
+    for (stage in 1:nStages){
+      # Phenotypic evaluation of experimental lines
+      exptLines <- AlphaSimR::setPheno(exptLines, varE=impliedVarE[stage], simParam=SP)
+      # Add the information to the records
+      records <- dplyr::bind_rows(records, makeRecFromPop(exptLines, varE=impliedVarE[stage]))
+      # Select among lines to advance to the next stage
+      keep <- sort(order(AlphaSimR::pheno(exptLines), decreasing=T)[1:nEntries[stage+1]])
+      # Phenotypic evaluation of Stage 2 lines
+      exptLines <- exptLines[keep]
+    }
+    gainEachRepeat[i] <- mean(AlphaSimR::gv(exptLines)) - startMeanGV
+  }
+  # print(paste("Gain from selection", round(mean(gainEachRepeat), 3), "+/-", round(sd(gainEachRepeat) / sqrt(nRepeat), 3)))
+  gain_matrix[j,4]<<-round(mean(gainEachRepeat), 3)
+}
+
+
+```
+
+## Simulation with Spreadsheet's parameters
+
+This section is using the same settings and calculations as in the spreadsheet
+
+```{r Spreadsheet}
+if(Fgen == "DH"){
+  InbCoef <- 1
+}else{
+  InbCoef <- (1-1/2^(Fgen-1))
+}
+
+sim_spreadsheet <- function(nEntries,j){
+  Gain_total = 0
+  for(i in 1:nStages){
+    H2_stage <- (InbCoef*varG)/(InbCoef*(varG+varGL/nLoc[i]+varGY/nYears[i]+varGLY/(nLoc[i]*nYears[i])+varE/(nLoc[i]*nYears[i]*nRep[i])))
+    Accuracy <- H2_stage^0.5
+    Selected <- (nEntries[i+1]/nEntries[i])
+    Tsh_x <- -qnorm(Selected)
+    Tsh_z <- exp(-0.5*(Tsh_x^2))/sqrt(2*pi)
+    Self_diff_inf <- Tsh_z/Selected
+    Self_diff_fin <- Self_diff_inf-(nEntries[i]-nEntries[i]*Selected)/(2*Selected*nEntries[i]*((nEntries[i]+1)*Self_diff_inf))
+    Gain <- Self_diff_fin*Accuracy*sqrt(varG/InbCoef)
+    Gain_total = Gain_total + Gain
+    gain_matrix[j,5]<<-round(Gain_total,3)
+    gain_matrix[j,1] <<- j
+    gain_matrix[j,2] <<- nEntries[1]
+    # print(round(Gain_total,3))
+  }
+  
+}
+
+#Preparing a matrix to store results from each method of simulation
+gain_matrix <- matrix(data = NA, nrow = Simulations, ncol = 5)
+
+#Loop to call functions to simulate for each model
+for( j in 1:Simulations){
+  if(j >1){
+    nEntries[1] <- nEntries[1] +50
+  }
+  sel_gain(nEntries,j)
+  pop_alpha(nEntries[1])
+  geno_alpha(founderHaps)
+  Sim_alpha(founders,nStages, SP, j)
+  sim_spreadsheet(nEntries,j)
+  
+}
+```
+## Ploting the Result
+This picture shows the result of genetic gain for each method.
+
+```{r ploting}
+
+print(gain_matrix[1:5,])
+
+plot(x = gain_matrix[,2], y = gain_matrix[,3], xlim = c(500,(50*Simulations)), ylim = c(1.3,3.55),
+     xlab="Population Size", ylab="Genetic Gain") #, xlim = c(2000,4000)
+lines(gain_matrix[,2], gain_matrix[,3], col="black",lty=2)
+points(gain_matrix[,2],gain_matrix[,4], col="red", pch="*")
+lines(gain_matrix[,2], gain_matrix[,4], col="red",lty=2)
+points(gain_matrix[,2],gain_matrix[,5], col="blue", pch="+")
+lines(gain_matrix[,2], gain_matrix[,5], col="blue",lty=2)
+abline(h=2.412, col="purple")
+legend("bottomright", legend=c("Selectiongain", "AlphasimR","Spreadsheet"),
+       col=c("black","red", "blue"), lty=1:2, cex=0.8)
+
+
+```
+
+### Discussion
+Having run this a couple times, it looks to me like `selectiongain` is expecting higher gain than `AlphaSimR`, though they are close, and both less than the Atlin and Econopouly spreadsheet.  There is at least one problem with the `AlphaSimR` approach that would lead it to *over-estimate* gain.  Observations that are made in the same location but in different years have some covariance because of shared GxL deviations.  That covariance means that using the same locations doesn't reduce noise from interactions as much as using different locations.  In the `AlphaSimR` simulation, we model the GxL interaction as pure error, which is equivalent to "using the different locations". `selectiongain`, in contrast, models covariances assuming using the same locations.  The `selectiongain` approach might over-estimate gain because, in working with the normal distribution, it assumes infinite population size (see the Atlin and Econopouly spreadsheet, which applies a correction for that).  
+I am also curious about this issue: in the simulation outlined above, I have only started with one founder population.  I don't have a good intuition as to whether starting with a different founder population for each repeat of the simulation would make a difference.  It could well.  
+Finally, on the other hand, `AlphaSimR` gives us all the intermediate information.  For example, we could, I think relatively easily, select in Stage 2 and Stage 3 not just on the observation from that stage, but on the mean observation across all previous stages: that should improve selection accuracy in a way that a breeder could take advantage of, but that would require some thinking to model with the `selectiongain` multivariate normal approach.  
+
+> Choose three or four multistage selection scenarios (different numbers of entried, locations, reps) that you think would have more or less the same budget.  Test them with the Atlin and Econopouly spreadsheet, with `selectiongain`, and with `AlphaSimR`.  Are the rankings of the scenarios the same across the different methods?  
+  
+> **Bonus1**: Consider how you would model the *cost* of a breeding pipeline  
+  
+> **Bonus2**: Test the question of variation in gain, for the same selection scenario, across different founder populations.  How great is the variation of the founder population effect relative to the variation between repeats within a founder population?
